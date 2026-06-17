@@ -16,7 +16,7 @@
 // Also update version.txt in the repo root to match.
 // =====================================================
 
-#define HUB_FIRMWARE_VERSION "1.1.0"
+#define HUB_FIRMWARE_VERSION "1.1.1"
 
 // =====================================================
 // BOOTSTRAP CONFIG
@@ -51,7 +51,7 @@
 // BACKEND API (hardcoded — no longer configurable via portal)
 // =====================================================
 
-#define HUB_API_URL "http://154.146.239.186/api/v1/iot/ingest"
+#define HUB_API_URL "http://192.168.100.15:8000/api/v1/iot/ingest"
 
 #define HEARTBEAT_INTERVAL_MS 10000  // HUB_PING sent to backend every 10 seconds
 
