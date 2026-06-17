@@ -16,7 +16,7 @@
 // Also update version.txt in the repo root to match.
 // =====================================================
 
-#define HUB_FIRMWARE_VERSION "1.2.0"
+#define HUB_FIRMWARE_VERSION "1.3.0"
 
 // =====================================================
 // BOOTSTRAP CONFIG
@@ -70,7 +70,9 @@
 // =====================================================
 
 #define AP_PASSWORD    "12345678"
-#define ESPNOW_CHANNEL 8
+#define ESPNOW_CHANNEL 8  // fallback only — real channel follows the Wi-Fi router once STA is connected
+
+#define CHANNEL_CHECK_INTERVAL_MS 5000
 
 // =====================================================
 // PROTOCOL CONSTANTS
@@ -191,6 +193,14 @@ unsigned long lastPacketMs    = 0;
 unsigned long lastBackendMs   = 0;
 unsigned long lastOtaCheckMs  = 0;
 unsigned long lastHeartbeatMs = 0;
+unsigned long lastChannelCheckMs = 0;
+
+// Real operating channel for AP + ESP-NOW. ESP32 has one radio, so once STA
+// joins the real Wi-Fi router, the radio (and the co-located softAP) is
+// forced onto the router's channel — ESPNOW_CHANNEL is only a fallback for
+// when there's no Wi-Fi configured at all. Buttons don't join any router, so
+// they discover this channel by hopping (see button firmware).
+int activeChannel = ESPNOW_CHANNEL;
 
 uint32_t totalPacketsReceived = 0;
 uint32_t totalEventsQueued    = 0;
@@ -592,7 +602,7 @@ void sendOtaStartToAllButtons() {
     } else {
       esp_now_peer_info_t peerInfo = {};
       memcpy(peerInfo.peer_addr, knownButtons[i].mac, 6);
-      peerInfo.channel = ESPNOW_CHANNEL;
+      peerInfo.channel = 0;  // use whatever channel the radio is currently on
       peerInfo.encrypt = false;
       if (esp_now_add_peer(&peerInfo) != ESP_OK) continue;
     }
@@ -885,7 +895,7 @@ bool addPeerIfNeeded(const uint8_t *peerMac) {
   if (esp_now_is_peer_exist(peerMac)) return true;
   esp_now_peer_info_t peerInfo = {};
   memcpy(peerInfo.peer_addr, peerMac, 6);
-  peerInfo.channel = ESPNOW_CHANNEL;
+  peerInfo.channel = 0;  // use whatever channel the radio is currently on
   peerInfo.encrypt = false;
   esp_err_t result = esp_now_add_peer(&peerInfo);
   if (result == ESP_OK) {
@@ -1052,7 +1062,14 @@ static void onDataSent(const uint8_t *macAddr, esp_now_send_status_t status) {
 
 bool setupEspNow() {
   esp_wifi_set_ps(WIFI_PS_NONE);
-  esp_wifi_set_channel(ESPNOW_CHANNEL, WIFI_SECOND_CHAN_NONE);
+
+  // If STA is connected to the real router, the radio is already locked to
+  // that channel — match it instead of fighting it. Otherwise fall back to
+  // the fixed ESPNOW_CHANNEL (e.g. portal-only mode with no Wi-Fi).
+  activeChannel = (WiFi.status() == WL_CONNECTED) ? WiFi.channel() : ESPNOW_CHANNEL;
+  esp_wifi_set_channel(activeChannel, WIFI_SECOND_CHAN_NONE);
+  Serial.print("[ESP-NOW] Operating channel: "); Serial.println(activeChannel);
+
   Serial.print("[ESP-NOW] Hub STA MAC: "); Serial.println(WiFi.macAddress());
   Serial.print("[ESP-NOW] Hub AP MAC: ");  Serial.println(WiFi.softAPmacAddress());
   if (esp_now_init() != ESP_OK) {
@@ -1106,6 +1123,15 @@ void loop() {
   if (millis() - lastOtaCheckMs >= OTA_CHECK_INTERVAL_MS) {
     lastOtaCheckMs = millis();
     checkForUpdates();
+  }
+  if (millis() - lastChannelCheckMs >= CHANNEL_CHECK_INTERVAL_MS) {
+    lastChannelCheckMs = millis();
+    if (WiFi.status() == WL_CONNECTED && WiFi.channel() != activeChannel) {
+      activeChannel = WiFi.channel();
+      esp_wifi_set_channel(activeChannel, WIFI_SECOND_CHAN_NONE);
+      Serial.print("[ESP-NOW] Router channel changed, now operating on: ");
+      Serial.println(activeChannel);
+    }
   }
   if (millis() - lastPacketMs > 1500) {
     updateConnectionLED();
