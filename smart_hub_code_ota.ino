@@ -16,7 +16,7 @@
 // Also update version.txt in the repo root to match.
 // =====================================================
 
-#define HUB_FIRMWARE_VERSION "1.0.0"
+#define HUB_FIRMWARE_VERSION "1.1.0"
 
 // =====================================================
 // BOOTSTRAP CONFIG
@@ -46,6 +46,14 @@
 #define BTN_VERSION_URL "https://raw.githubusercontent.com/ismailoviic/smart_button_code_ota/main/version.txt"
 
 #define OTA_CHECK_INTERVAL_MS 10000  // 10 seconds for dev — change to 3600000 for production
+
+// =====================================================
+// BACKEND API (hardcoded — no longer configurable via portal)
+// =====================================================
+
+#define HUB_API_URL "http://154.146.239.186/api/v1/iot/ingest"
+
+#define HEARTBEAT_INTERVAL_MS 10000  // HUB_PING sent to backend every 10 seconds
 
 // =====================================================
 // PINS
@@ -172,8 +180,6 @@ String factoryId;
 String lineId;
 String wifiSSID;
 String wifiPassword;
-String apiUrl;
-String apiToken;
 
 BackendEvent eventQueue[EVENT_QUEUE_SIZE];
 volatile int queueHead = 0;
@@ -184,6 +190,7 @@ KnownButton knownButtons[MAX_KNOWN_BUTTONS];
 unsigned long lastPacketMs    = 0;
 unsigned long lastBackendMs   = 0;
 unsigned long lastOtaCheckMs  = 0;
+unsigned long lastHeartbeatMs = 0;
 
 uint32_t totalPacketsReceived = 0;
 uint32_t totalEventsQueued    = 0;
@@ -285,6 +292,20 @@ String htmlEscape(String value) {
 // KNOWN BUTTONS
 // =====================================================
 
+uint16_t getButtonBatteryMv(const char *name) {
+  for (int i = 0; i < MAX_KNOWN_BUTTONS; i++) {
+    if (knownButtons[i].active && strcmp(knownButtons[i].name, name) == 0)
+      return knownButtons[i].batteryMv;
+  }
+  return 0;
+}
+
+uint8_t getButtonBatteryPct(uint16_t mv) {
+  if (mv >= 4200) return 100;
+  if (mv <= 3000) return 0;
+  return (uint8_t)((mv - 3000UL) * 100 / 1200);
+}
+
 void registerButton(const uint8_t *mac, const char *name, uint16_t batteryMv = 0) {
   for (int i = 0; i < MAX_KNOWN_BUTTONS; i++) {
     if (knownButtons[i].active && memcmp(knownButtons[i].mac, mac, 6) == 0) {
@@ -347,8 +368,6 @@ void saveBootstrapIdentityIfNeeded() {
     if (!initialized) {
       prefs.putString("ssid",     "");
       prefs.putString("pass",     "");
-      prefs.putString("apiurl",   "");
-      prefs.putString("apitoken", "");
     }
     prefs.putBool("initialized", true);
   }
@@ -363,8 +382,6 @@ void loadConfig() {
   lineId      = prefs.getString("line",     BOOTSTRAP_LINE_ID);
   wifiSSID    = prefs.getString("ssid",     "");
   wifiPassword= prefs.getString("pass",     "");
-  apiUrl      = prefs.getString("apiurl",   "");
-  apiToken    = prefs.getString("apitoken", "");
   prefs.end();
 
   Serial.println();
@@ -373,13 +390,13 @@ void loadConfig() {
   Serial.print("Factory ID: "); Serial.println(factoryId);
   Serial.print("Line ID: ");    Serial.println(lineId);
   Serial.print("Wi-Fi SSID: "); Serial.println(wifiSSID);
-  Serial.print("API URL: ");    Serial.println(apiUrl);
+  Serial.print("API URL: ");    Serial.println(HUB_API_URL);
   Serial.println("=======================================");
 }
 
 void saveConfig(
   String newHubId, String newFactoryId, String newLineId,
-  String ssid, String pass, String newApiUrl, String newApiToken
+  String ssid, String pass
 ) {
   prefs.begin("hub_cfg", false);
   prefs.putString("hubid",       newHubId);
@@ -387,8 +404,6 @@ void saveConfig(
   prefs.putString("line",        newLineId);
   prefs.putString("ssid",        ssid);
   prefs.putString("pass",        pass);
-  prefs.putString("apiurl",      newApiUrl);
-  prefs.putString("apitoken",    newApiToken);
   prefs.putBool("initialized",   true);
   prefs.end();
   Serial.println("[NVS] Hub config saved.");
@@ -439,27 +454,26 @@ String buildBackendJson(const BackendEvent &ev) {
   json += "\"factory_id\":\"" + jsonEscape(factoryId) + "\",";
   json += "\"line_id\":\""    + jsonEscape(lineId)    + "\",";
   json += "\"hub_id\":\""     + jsonEscape(hubId)     + "\",";
+  json += "\"hub_firmware_version\":\"" + jsonEscape(String(HUB_FIRMWARE_VERSION)) + "\",";
+  json += "\"hub_uptime_seconds\":"     + String(millis() / 1000)                  + ",";
+  json += "\"hub_battery_mv\":0,";
+  json += "\"hub_battery_pct\":0,";
   json += "\"button_id\":\""  + jsonEscape(String(ev.buttonId))  + "\",";
   json += "\"button_mac\":\"" + jsonEscape(String(ev.buttonMac)) + "\",";
+  json += "\"button_firmware_version\":\"" + jsonEscape(String(ev.firmwareVersion)) + "\",";
+  json += "\"button_battery_mv\":"   + String(ev.batteryMv)      + ",";
+  json += "\"button_battery_pct\":"  + String(ev.batteryPercent) + ",";
   json += "\"event_type\":\"" + jsonEscape(String(ev.eventType)) + "\",";
   json += "\"badge_uid\":\""  + jsonEscape(String(ev.badgeUid))  + "\",";
-  json += "\"firmware_version\":\"" + jsonEscape(String(ev.firmwareVersion)) + "\",";
   json += "\"boot_id\":"      + String(ev.bootId)        + ",";
   json += "\"sequence\":"     + String(ev.sequence)      + ",";
   json += "\"uptime_seconds\":"+ String(ev.uptimeSeconds)+ ",";
-  json += "\"battery_mv\":"   + String(ev.batteryMv)     + ",";
-  json += "\"battery_percent\":"+ String(ev.batteryPercent) + ",";
   json += "\"event_value\":"  + String(ev.eventValue);
   json += "}";
   return json;
 }
 
 bool sendEventToBackend(const BackendEvent &ev) {
-  if (apiUrl.length() == 0) {
-    lastBackendStatus = "API URL missing";
-    totalEventsFailed++;
-    return false;
-  }
   if (!ensureWiFiConnected()) {
     lastBackendStatus = "Wi-Fi not connected";
     totalEventsFailed++;
@@ -468,13 +482,14 @@ bool sendEventToBackend(const BackendEvent &ev) {
   String json = buildBackendJson(ev);
   Serial.println();
   Serial.println("========== BACKEND POST ==========");
-  Serial.print("URL: "); Serial.println(apiUrl);
+  Serial.print("URL: "); Serial.println(HUB_API_URL);
   Serial.println(json);
   Serial.println("==================================");
 
   HTTPClient http;
   WiFiClient       normalClient;
   WiFiClientSecure secureClient;
+  String apiUrl = HUB_API_URL;
   bool isHttps = apiUrl.startsWith("https://");
   bool beginOk = isHttps
     ? (secureClient.setInsecure(), http.begin(secureClient, apiUrl))
@@ -488,10 +503,6 @@ bool sendEventToBackend(const BackendEvent &ev) {
   http.setTimeout(15000);
   http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
   http.addHeader("Content-Type", "application/json");
-  if (apiToken.length() > 0) {
-    http.addHeader("x-device-token", apiToken);
-    http.addHeader("Authorization",  "Bearer " + apiToken);
-  }
   int    code     = http.POST(json);
   String response = http.getString();
   http.end();
@@ -521,6 +532,22 @@ void processBackendQueue() {
   BackendEvent ev;
   if (!dequeueBackendEvent(ev)) return;
   sendEventToBackend(ev);
+}
+
+void sendHeartbeat() {
+  BackendEvent ev = {};
+  safeCopy(ev.eventType,       "HUB_PING", sizeof(ev.eventType));
+  safeCopy(ev.buttonId,        "",         sizeof(ev.buttonId));
+  safeCopy(ev.buttonMac,       "",         sizeof(ev.buttonMac));
+  safeCopy(ev.badgeUid,        "",         sizeof(ev.badgeUid));
+  safeCopy(ev.firmwareVersion, "",         sizeof(ev.firmwareVersion));
+  ev.bootId        = 0;
+  ev.sequence      = 0;
+  ev.uptimeSeconds = millis() / 1000;
+  ev.batteryMv     = 0;
+  ev.batteryPercent= 0;
+  ev.eventValue    = 0;
+  enqueueBackendEvent(ev);
 }
 
 // =====================================================
@@ -725,6 +752,7 @@ String htmlPage() {
   html += "<br><b>Setup:</b> http://192.168.4.1";
   html += "<br><b>Wi-Fi:</b> "   + htmlEscape(lastWifiStatus);
   html += "<br><b>OTA URL:</b><br>" + htmlEscape(String(HUB_BIN_URL));
+  html += "<br><b>Backend API URL:</b><br>" + htmlEscape(String(HUB_API_URL));
   html += "</div>";
   html += "<h3>Status</h3>";
   html += "<div class='info'>";
@@ -763,9 +791,6 @@ String htmlPage() {
   html += "<label>Line ID</label><input name='line' value='"    + htmlEscape(lineId)     + "'>";
   html += "<label>Wi-Fi SSID</label><input name='ssid' value='" + htmlEscape(wifiSSID)   + "'>";
   html += "<label>Wi-Fi Password</label><input name='pass' type='password' value='" + htmlEscape(wifiPassword) + "'>";
-  html += "<label>Supabase / Backend API URL</label>";
-  html += "<input name='apiurl' placeholder='https://.../functions/v1/iot-event-ingest' value='" + htmlEscape(apiUrl) + "'>";
-  html += "<label>API Token</label><input name='apitoken' type='password' value='" + htmlEscape(apiToken) + "'>";
   html += "<button type='submit'>Save Config</button></form>";
   html += "<form action='/test' method='POST'><button type='submit'>Send Test Event To Backend</button></form>";
   html += "<form action='/update' method='POST'><button type='submit'>Update Hub From GitHub Now</button></form>";
@@ -782,8 +807,7 @@ void handleRoot() {
 void handleSave() {
   saveConfig(
     server.arg("hubid"), server.arg("factory"), server.arg("line"),
-    server.arg("ssid"),  server.arg("pass"),
-    server.arg("apiurl"),server.arg("apitoken")
+    server.arg("ssid"),  server.arg("pass")
   );
   server.send(200, "text/html", "<h2>Saved</h2><p>Config saved. Restarting Hub...</p>");
   delay(800);
@@ -938,9 +962,9 @@ void handleSimplePacket(const uint8_t *senderMac, const uint8_t *incomingData, i
   ev.bootId        = 0;
   ev.sequence      = packet.counter;
   ev.uptimeSeconds = millis() / 1000;
-  ev.batteryMv     = 0;
-  ev.batteryPercent= 0;
-  ev.eventValue    = packet.counter;
+  ev.batteryMv      = getButtonBatteryMv(packet.from);
+  ev.batteryPercent = getButtonBatteryPct(ev.batteryMv);
+  ev.eventValue     = packet.counter;
 
   enqueueBackendEvent(ev);
   sendSimpleAck(senderMac, packet.from, packet.counter);
@@ -1063,6 +1087,10 @@ void loop() {
   dnsServer.processNextRequest();
   server.handleClient();
   processBackendQueue();
+  if (millis() - lastHeartbeatMs >= HEARTBEAT_INTERVAL_MS) {
+    lastHeartbeatMs = millis();
+    sendHeartbeat();
+  }
   if (millis() - lastOtaCheckMs >= OTA_CHECK_INTERVAL_MS) {
     lastOtaCheckMs = millis();
     checkForUpdates();
