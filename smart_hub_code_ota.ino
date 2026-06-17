@@ -16,7 +16,7 @@
 // Also update version.txt in the repo root to match.
 // =====================================================
 
-#define HUB_FIRMWARE_VERSION "1.1.1"
+#define HUB_FIRMWARE_VERSION "1.2.0"
 
 // =====================================================
 // BOOTSTRAP CONFIG
@@ -219,9 +219,16 @@ void ledGreen()  { setLED(false, true,  false); }
 void ledYellow() { setLED(true,  true,  false); }
 void ledPurple() { setLED(true,  false, true);  }
 void ledRed()    { setLED(true,  false, false); }
+void ledCyan()   { setLED(false, true,  true);  }  // OTA in progress: green + blue
+
+bool backendOnline = false;
+
+void updateConnectionLED() {
+  if (backendOnline) ledGreen(); else ledBlue();
+}
 
 void blinkPurpleDuringOTA() {
-  ledPurple();
+  ledCyan();
   delay(150);
   setLED(false, false, false);
   delay(150);
@@ -477,6 +484,7 @@ bool sendEventToBackend(const BackendEvent &ev) {
   if (!ensureWiFiConnected()) {
     lastBackendStatus = "Wi-Fi not connected";
     totalEventsFailed++;
+    backendOnline = false;
     return false;
   }
   String json = buildBackendJson(ev);
@@ -498,6 +506,7 @@ bool sendEventToBackend(const BackendEvent &ev) {
   if (!beginOk) {
     lastBackendStatus = "HTTP begin failed";
     totalEventsFailed++;
+    backendOnline = false;
     return false;
   }
   http.setTimeout(15000);
@@ -519,12 +528,15 @@ bool sendEventToBackend(const BackendEvent &ev) {
   if (code >= 200 && code < 300) {
     lastBackendStatus = "POST OK";
     totalEventsPosted++;
-    ledGreen(); delay(80); ledBlue();
+    backendOnline = true;
+    updateConnectionLED();
     return true;
   }
   lastBackendStatus = "POST failed";
   totalEventsFailed++;
-  ledYellow(); delay(120); ledBlue();
+  backendOnline = false;
+  ledYellow(); delay(120);
+  updateConnectionLED();
   return false;
 }
 
@@ -704,7 +716,7 @@ bool performOTA() {
   }
   http.end();
   Serial.println("[OTA] SUCCESS. Restarting.");
-  ledPurple();
+  ledCyan();
   delay(1000);
   ESP.restart();
   return true;
@@ -1096,6 +1108,6 @@ void loop() {
     checkForUpdates();
   }
   if (millis() - lastPacketMs > 1500) {
-    ledBlue();
+    updateConnectionLED();
   }
 }
