@@ -40,7 +40,7 @@
 // OTA URLS + AUTO-CHECK INTERVAL
 // =====================================================
 
-#define HUB_BIN_URL     "https://raw.githubusercontent.com/ismailoviic/smart_hub_code_ota/main/build/esp32.esp32.esp32/smart_hub_code_ota.ino.bin"
+#define HUB_BIN_URL     "https://raw.githubusercontent.com/ismailoviic/smart_hub_code_ota/main/build/esp32dev/firmware.bin"
 #define HUB_VERSION_URL "https://raw.githubusercontent.com/ismailoviic/smart_hub_code_ota/main/version.txt"
 
 #define BTN_VERSION_URL "https://raw.githubusercontent.com/ismailoviic/smart_button_code_ota/main/version.txt"
