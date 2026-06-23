@@ -16,7 +16,7 @@
 // Also update version.txt in the repo root to match.
 // =====================================================
 
-#define HUB_FIRMWARE_VERSION "1.3.0"
+#define HUB_FIRMWARE_VERSION "1.5.0"
 
 // =====================================================
 // BOOTSTRAP CONFIG
@@ -51,7 +51,7 @@
 // BACKEND API (hardcoded — no longer configurable via portal)
 // =====================================================
 
-#define HUB_API_URL "http://192.168.100.15:8000/api/v1/iot/ingest"
+#define HUB_API_URL "http://13.38.147.196/api/v1/iot/ingest"
 
 #define HEARTBEAT_INTERVAL_MS 10000  // HUB_PING sent to backend every 10 seconds
 
@@ -213,6 +213,23 @@ String lastBackendStatus   = "No backend request yet";
 String lastBackendResponse = "";
 String lastReceivedSummary = "No ESP-NOW packet yet";
 String lastWifiStatus      = "Not connected";
+
+// =====================================================
+// LIVE EVENT LOG (for the /logs debug view on the portal)
+// =====================================================
+
+#define LOG_BUFFER_SIZE 60
+String eventLog[LOG_BUFFER_SIZE];
+int logNext  = 0;
+int logCount = 0;
+
+void addLog(const String &entry) {
+  String stamped = "[" + String(millis() / 1000) + "s] " + entry;
+  eventLog[logNext] = stamped;
+  logNext = (logNext + 1) % LOG_BUFFER_SIZE;
+  if (logCount < LOG_BUFFER_SIZE) logCount++;
+  Serial.println(stamped);
+}
 
 // =====================================================
 // LED
