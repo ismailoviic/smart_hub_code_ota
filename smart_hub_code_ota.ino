@@ -16,7 +16,7 @@
 // Also update version.txt in the repo root to match.
 // =====================================================
 
-#define HUB_FIRMWARE_VERSION "1.7.0"
+#define HUB_FIRMWARE_VERSION "1.8.0"
 
 // =====================================================
 // BOOTSTRAP CONFIG
@@ -45,7 +45,7 @@
 
 #define BTN_VERSION_URL "https://raw.githubusercontent.com/ismailoviic/smart_button_code_ota/main/version.txt"
 
-#define OTA_CHECK_INTERVAL_MS 10000  // 10 seconds for dev — change to 3600000 for production
+#define OTA_CHECK_INTERVAL_MS 3600000  // 1 hour. Use the portal "Update Now" button for instant updates while testing.
 
 // =====================================================
 // BACKEND API (hardcoded — no longer configurable via portal)
@@ -679,6 +679,19 @@ void sendOtaStartToAllButtons() {
 
 bool connectWiFiForOTA();
 bool performOTA();
+bool setupEspNow();
+
+// Restore the AP + ESP-NOW after a FAILED OTA (connectWiFiForOTA() deinit'd
+// ESP-NOW and dropped the softAP by switching to WIFI_STA). Done in place,
+// without rebooting, so a persistently-failing OTA can never boot-loop the hub.
+void recoverRadioAfterFailedOTA() {
+  WiFi.mode(WIFI_AP_STA);
+  WiFi.softAPConfig(apIP, apIP, netMsk);
+  WiFi.softAP(hubId.c_str(), AP_PASSWORD, ESPNOW_CHANNEL);
+  ensureWiFiConnected(8000);
+  setupEspNow();
+  Serial.println("[AUTO-OTA] Radio restored (AP + ESP-NOW).");
+}
 
 void checkForUpdates() {
   if (!ensureWiFiConnected(5000)) {
@@ -690,7 +703,11 @@ void checkForUpdates() {
   String remoteHubVersion = fetchRemoteVersion(HUB_VERSION_URL);
   if (remoteHubVersion.length() > 0 && remoteHubVersion != HUB_FIRMWARE_VERSION) {
     Serial.println("[AUTO-OTA] Hub version changed: " + String(HUB_FIRMWARE_VERSION) + " -> " + remoteHubVersion);
+    // performOTA() restarts on success. On failure, restore the radio in place
+    // (connectWiFiForOTA() already deinit'd ESP-NOW) so the hub keeps receiving
+    // button presses instead of going deaf until a power-cycle.
     if (connectWiFiForOTA()) performOTA();
+    recoverRadioAfterFailedOTA();
     return;
   }
   Serial.println("[AUTO-OTA] Hub up to date (" + String(HUB_FIRMWARE_VERSION) + ").");
@@ -1175,6 +1192,11 @@ void setup() {
   Serial.println("[BOOT] Hub is running.");
   Serial.println("[BOOT] Portal always active.");
   Serial.println("[BOOT] Waiting for Buttons...");
+
+  // Check for firmware updates on boot (then every OTA_CHECK_INTERVAL_MS).
+  // On success this OTAs + restarts; on failure the radio is restored in place.
+  checkForUpdates();
+  lastOtaCheckMs = millis();
 }
 
 void loop() {
