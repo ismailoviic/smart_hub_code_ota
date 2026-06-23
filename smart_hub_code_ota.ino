@@ -16,7 +16,7 @@
 // Also update version.txt in the repo root to match.
 // =====================================================
 
-#define HUB_FIRMWARE_VERSION "1.5.0"
+#define HUB_FIRMWARE_VERSION "1.6.0"
 
 // =====================================================
 // BOOTSTRAP CONFIG
@@ -182,6 +182,12 @@ String factoryId;
 String lineId;
 String wifiSSID;
 String wifiPassword;
+// Backend endpoint config (persisted in NVS, survives OTA). The hub auto-picks
+// the dev URL when connected to the dev Wi-Fi SSID, otherwise the prod URL — so
+// the SAME binary works in dev and prod with no rebuild. See resolveApiUrl().
+String prodApiUrl;   // default = HUB_API_URL
+String devSsid;      // when the hub joins this SSID, use devApiUrl
+String devApiUrl;    // dev backend ingest URL (e.g. http://192.168.x.x:8000/api/v1/iot/ingest)
 
 BackendEvent eventQueue[EVENT_QUEUE_SIZE];
 volatile int queueHead = 0;
@@ -402,6 +408,9 @@ void saveBootstrapIdentityIfNeeded() {
     if (!initialized) {
       prefs.putString("ssid",     "");
       prefs.putString("pass",     "");
+      prefs.putString("prod_url", HUB_API_URL);
+      prefs.putString("dev_ssid", "");
+      prefs.putString("dev_url",  "");
     }
     prefs.putBool("initialized", true);
   }
@@ -416,6 +425,9 @@ void loadConfig() {
   lineId      = prefs.getString("line",     BOOTSTRAP_LINE_ID);
   wifiSSID    = prefs.getString("ssid",     "");
   wifiPassword= prefs.getString("pass",     "");
+  prodApiUrl  = prefs.getString("prod_url", HUB_API_URL);
+  devSsid     = prefs.getString("dev_ssid", "");
+  devApiUrl   = prefs.getString("dev_url",  "");
   prefs.end();
 
   Serial.println();
@@ -424,13 +436,24 @@ void loadConfig() {
   Serial.print("Factory ID: "); Serial.println(factoryId);
   Serial.print("Line ID: ");    Serial.println(lineId);
   Serial.print("Wi-Fi SSID: "); Serial.println(wifiSSID);
-  Serial.print("API URL: ");    Serial.println(HUB_API_URL);
+  Serial.print("Prod API URL: ");Serial.println(prodApiUrl);
+  Serial.print("Dev SSID: ");    Serial.println(devSsid);
+  Serial.print("Dev API URL: "); Serial.println(devApiUrl);
   Serial.println("=======================================");
+}
+
+// Pick the backend URL at runtime: dev URL when on the dev Wi-Fi, else prod.
+String resolveApiUrl() {
+  if (devApiUrl.length() > 0 && devSsid.length() > 0 && WiFi.SSID() == devSsid) {
+    return devApiUrl;
+  }
+  return prodApiUrl.length() > 0 ? prodApiUrl : String(HUB_API_URL);
 }
 
 void saveConfig(
   String newHubId, String newFactoryId, String newLineId,
-  String ssid, String pass
+  String ssid, String pass,
+  String prodUrl, String devSsidArg, String devUrl
 ) {
   prefs.begin("hub_cfg", false);
   prefs.putString("hubid",       newHubId);
@@ -438,6 +461,10 @@ void saveConfig(
   prefs.putString("line",        newLineId);
   prefs.putString("ssid",        ssid);
   prefs.putString("pass",        pass);
+  // Keep the current prod URL if the field was left blank (never blank it out).
+  prefs.putString("prod_url",    prodUrl.length() ? prodUrl : prodApiUrl);
+  prefs.putString("dev_ssid",    devSsidArg);
+  prefs.putString("dev_url",     devUrl);
   prefs.putBool("initialized",   true);
   prefs.end();
   Serial.println("[NVS] Hub config saved.");
@@ -515,16 +542,16 @@ bool sendEventToBackend(const BackendEvent &ev) {
     return false;
   }
   String json = buildBackendJson(ev);
+  String apiUrl = resolveApiUrl();
   Serial.println();
   Serial.println("========== BACKEND POST ==========");
-  Serial.print("URL: "); Serial.println(HUB_API_URL);
+  Serial.print("URL: "); Serial.println(apiUrl);
   Serial.println(json);
   Serial.println("==================================");
 
   HTTPClient http;
   WiFiClient       normalClient;
   WiFiClientSecure secureClient;
-  String apiUrl = HUB_API_URL;
   bool isHttps = apiUrl.startsWith("https://");
   bool beginOk = isHttps
     ? (secureClient.setInsecure(), http.begin(secureClient, apiUrl))
@@ -791,7 +818,10 @@ String htmlPage() {
   html += "<br><b>Setup:</b> http://192.168.4.1";
   html += "<br><b>Wi-Fi:</b> "   + htmlEscape(lastWifiStatus);
   html += "<br><b>OTA URL:</b><br>" + htmlEscape(String(HUB_BIN_URL));
-  html += "<br><b>Backend API URL:</b><br>" + htmlEscape(String(HUB_API_URL));
+  html += "<br><b>Active API URL:</b><br>" + htmlEscape(resolveApiUrl());
+  html += "<br><b>Prod URL:</b><br>" + htmlEscape(prodApiUrl);
+  if (devSsid.length())
+    html += "<br><b>Dev SSID:</b> " + htmlEscape(devSsid) + " &rarr; " + htmlEscape(devApiUrl);
   html += "</div>";
   html += "<h3>Status</h3>";
   html += "<div class='info'>";
@@ -830,6 +860,10 @@ String htmlPage() {
   html += "<label>Line ID</label><input name='line' value='"    + htmlEscape(lineId)     + "'>";
   html += "<label>Wi-Fi SSID</label><input name='ssid' value='" + htmlEscape(wifiSSID)   + "'>";
   html += "<label>Wi-Fi Password</label><input name='pass' type='password' value='" + htmlEscape(wifiPassword) + "'>";
+  html += "<label>Prod Backend URL</label><input name='prod_url' value='" + htmlEscape(prodApiUrl) + "'>";
+  html += "<label>Dev Wi-Fi SSID (auto-switch)</label><input name='dev_ssid' value='" + htmlEscape(devSsid) + "'>";
+  html += "<label>Dev Backend URL</label><input name='dev_url' value='" + htmlEscape(devApiUrl) + "'>";
+  html += "<small>On the Dev SSID the hub posts to the Dev URL; otherwise the Prod URL. Leave Dev fields blank to always use Prod.</small>";
   html += "<button type='submit'>Save Config</button></form>";
   html += "<form action='/test' method='POST'><button type='submit'>Send Test Event To Backend</button></form>";
   html += "<form action='/update' method='POST'><button type='submit'>Update Hub From GitHub Now</button></form>";
@@ -846,7 +880,8 @@ void handleRoot() {
 void handleSave() {
   saveConfig(
     server.arg("hubid"), server.arg("factory"), server.arg("line"),
-    server.arg("ssid"),  server.arg("pass")
+    server.arg("ssid"),  server.arg("pass"),
+    server.arg("prod_url"), server.arg("dev_ssid"), server.arg("dev_url")
   );
   server.send(200, "text/html", "<h2>Saved</h2><p>Config saved. Restarting Hub...</p>");
   delay(800);
