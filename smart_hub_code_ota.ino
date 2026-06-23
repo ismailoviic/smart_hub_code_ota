@@ -16,7 +16,7 @@
 // Also update version.txt in the repo root to match.
 // =====================================================
 
-#define HUB_FIRMWARE_VERSION "1.6.0"
+#define HUB_FIRMWARE_VERSION "1.7.0"
 
 // =====================================================
 // BOOTSTRAP CONFIG
@@ -442,11 +442,8 @@ void loadConfig() {
   Serial.println("=======================================");
 }
 
-// Pick the backend URL at runtime: dev URL when on the dev Wi-Fi, else prod.
-String resolveApiUrl() {
-  if (devApiUrl.length() > 0 && devSsid.length() > 0 && WiFi.SSID() == devSsid) {
-    return devApiUrl;
-  }
+// Effective prod URL (falls back to the compiled-in default).
+String effectiveProdUrl() {
   return prodApiUrl.length() > 0 ? prodApiUrl : String(HUB_API_URL);
 }
 
@@ -534,6 +531,31 @@ String buildBackendJson(const BackendEvent &ev) {
   return json;
 }
 
+// POST the JSON to one URL. Returns the HTTP status code, or -1 on a transport
+// failure. The body (truncated) is written to outResp.
+int postJsonTo(const String &url, const String &json, int timeoutMs, String &outResp) {
+  outResp = "";
+  if (url.length() == 0) return 0;  // not configured -> skipped
+
+  HTTPClient http;
+  WiFiClient       normalClient;
+  WiFiClientSecure secureClient;
+  bool isHttps = url.startsWith("https://");
+  bool beginOk = isHttps
+    ? (secureClient.setInsecure(), http.begin(secureClient, url))
+    : http.begin(normalClient, url);
+  if (!beginOk) return -1;
+
+  http.setTimeout(timeoutMs);
+  http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
+  http.addHeader("Content-Type", "application/json");
+  int code = http.POST(json);
+  outResp = http.getString();
+  if (outResp.length() > 500) outResp = outResp.substring(0, 500);
+  http.end();
+  return code;
+}
+
 bool sendEventToBackend(const BackendEvent &ev) {
   if (!ensureWiFiConnected()) {
     lastBackendStatus = "Wi-Fi not connected";
@@ -542,51 +564,44 @@ bool sendEventToBackend(const BackendEvent &ev) {
     return false;
   }
   String json = buildBackendJson(ev);
-  String apiUrl = resolveApiUrl();
+
+  // TESTING: every event is sent to BOTH prod (always) and dev (if a Dev URL is
+  // configured). Prod is the primary/source of truth; dev is best-effort with a
+  // short timeout so an unreachable dev box never stalls prod for long.
+  String prodUrl = effectiveProdUrl();
   Serial.println();
   Serial.println("========== BACKEND POST ==========");
-  Serial.print("URL: "); Serial.println(apiUrl);
+  Serial.print("PROD URL: "); Serial.println(prodUrl);
   Serial.println(json);
   Serial.println("==================================");
 
-  HTTPClient http;
-  WiFiClient       normalClient;
-  WiFiClientSecure secureClient;
-  bool isHttps = apiUrl.startsWith("https://");
-  bool beginOk = isHttps
-    ? (secureClient.setInsecure(), http.begin(secureClient, apiUrl))
-    : http.begin(normalClient, apiUrl);
+  String prodResp;
+  int prodCode = postJsonTo(prodUrl, json, 15000, prodResp);
+  bool prodOk = (prodCode >= 200 && prodCode < 300);
+  Serial.print("[PROD] HTTP code: "); Serial.println(prodCode);
 
-  if (!beginOk) {
-    lastBackendStatus = "HTTP begin failed";
-    totalEventsFailed++;
-    backendOnline = false;
-    return false;
+  String devStatus = "off";
+  if (devApiUrl.length() > 0) {
+    Serial.print("DEV URL: "); Serial.println(devApiUrl);
+    String devResp;
+    int devCode = postJsonTo(devApiUrl, json, 4000, devResp);
+    bool devOk = (devCode >= 200 && devCode < 300);
+    devStatus = (devOk ? "OK " : "FAIL ") + String(devCode);
+    Serial.print("[DEV] HTTP code: "); Serial.println(devCode);
   }
-  http.setTimeout(15000);
-  http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
-  http.addHeader("Content-Type", "application/json");
-  int    code     = http.POST(json);
-  String response = http.getString();
-  http.end();
 
-  lastHttpCode        = code;
-  lastBackendResponse = response;
-  if (lastBackendResponse.length() > 500)
-    lastBackendResponse = lastBackendResponse.substring(0, 500);
-  lastBackendMs = millis();
+  lastHttpCode        = prodCode;
+  lastBackendResponse = prodResp;
+  lastBackendMs       = millis();
 
-  Serial.print("[BACKEND] HTTP code: "); Serial.println(code);
-  Serial.print("[BACKEND] Response: ");  Serial.println(response);
-
-  if (code >= 200 && code < 300) {
-    lastBackendStatus = "POST OK";
+  if (prodOk) {
+    lastBackendStatus = "PROD OK | DEV " + devStatus;
     totalEventsPosted++;
     backendOnline = true;
     updateConnectionLED();
     return true;
   }
-  lastBackendStatus = "POST failed";
+  lastBackendStatus = "PROD FAIL " + String(prodCode) + " | DEV " + devStatus;
   totalEventsFailed++;
   backendOnline = false;
   ledYellow(); delay(120);
@@ -818,10 +833,9 @@ String htmlPage() {
   html += "<br><b>Setup:</b> http://192.168.4.1";
   html += "<br><b>Wi-Fi:</b> "   + htmlEscape(lastWifiStatus);
   html += "<br><b>OTA URL:</b><br>" + htmlEscape(String(HUB_BIN_URL));
-  html += "<br><b>Active API URL:</b><br>" + htmlEscape(resolveApiUrl());
-  html += "<br><b>Prod URL:</b><br>" + htmlEscape(prodApiUrl);
-  if (devSsid.length())
-    html += "<br><b>Dev SSID:</b> " + htmlEscape(devSsid) + " &rarr; " + htmlEscape(devApiUrl);
+  html += "<br><b>Prod URL (always):</b><br>" + htmlEscape(effectiveProdUrl());
+  if (devApiUrl.length())
+    html += "<br><b>Dev URL (also sent):</b><br>" + htmlEscape(devApiUrl);
   html += "</div>";
   html += "<h3>Status</h3>";
   html += "<div class='info'>";
@@ -861,9 +875,8 @@ String htmlPage() {
   html += "<label>Wi-Fi SSID</label><input name='ssid' value='" + htmlEscape(wifiSSID)   + "'>";
   html += "<label>Wi-Fi Password</label><input name='pass' type='password' value='" + htmlEscape(wifiPassword) + "'>";
   html += "<label>Prod Backend URL</label><input name='prod_url' value='" + htmlEscape(prodApiUrl) + "'>";
-  html += "<label>Dev Wi-Fi SSID (auto-switch)</label><input name='dev_ssid' value='" + htmlEscape(devSsid) + "'>";
-  html += "<label>Dev Backend URL</label><input name='dev_url' value='" + htmlEscape(devApiUrl) + "'>";
-  html += "<small>On the Dev SSID the hub posts to the Dev URL; otherwise the Prod URL. Leave Dev fields blank to always use Prod.</small>";
+  html += "<label>Dev Backend URL (testing)</label><input name='dev_url' value='" + htmlEscape(devApiUrl) + "'>";
+  html += "<small>While testing, every event is sent to BOTH the Prod URL and the Dev URL. Leave Dev blank to send to Prod only.</small>";
   html += "<button type='submit'>Save Config</button></form>";
   html += "<form action='/test' method='POST'><button type='submit'>Send Test Event To Backend</button></form>";
   html += "<form action='/update' method='POST'><button type='submit'>Update Hub From GitHub Now</button></form>";
